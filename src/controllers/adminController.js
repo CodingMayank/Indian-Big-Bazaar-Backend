@@ -410,3 +410,64 @@ exports.getProductsByAdmin = async (req, res) => {
         });
     }
 };
+
+// DELETE /admin/product
+exports.deleteProduct = async (req, res) => {
+    try {
+        const { admin_id, product_id } = req.body;
+
+        if (!admin_id || !product_id) {
+            return res.status(400).json({
+                success: false,
+                message: "admin_id and product_id are required",
+            });
+        }
+
+        // 1. Check admin exists and is active
+        const adminResult = await pool.query(
+            `SELECT admin_id, is_active FROM indian_big_bazaar_admin WHERE admin_id = $1`,
+            [admin_id]
+        );
+
+        if (adminResult.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Admin not found",
+            });
+        }
+
+        if (!adminResult.rows[0].is_active) {
+            return res.status(403).json({
+                success: false,
+                message: "Admin account is inactive",
+            });
+        }
+
+        // 2. Check product exists and belongs to this admin, then delete
+        const deleteResult = await pool.query(
+            `DELETE FROM indian_big_bazaar_admin_products
+             WHERE product_id = $1 AND admin_id = $2
+             RETURNING product_id, product_name`,
+            [product_id, admin_id]
+        );
+
+        if (deleteResult.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found for this admin",
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Product deleted successfully",
+            deletedProduct: deleteResult.rows[0],
+        });
+    } catch (error) {
+        console.error("Delete product error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    }
+};

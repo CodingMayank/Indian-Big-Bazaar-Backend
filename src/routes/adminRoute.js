@@ -14,4 +14,7 @@ router.post("/createproduct", upload.single("product_image"), AdminController.cr
 
 router.get("/getproduct/:admin_id", AdminController.getProductsByAdmin);
 
+
+router.delete("/deleteproduct", AdminController.deleteProduct);
+
 module.exports = router;
