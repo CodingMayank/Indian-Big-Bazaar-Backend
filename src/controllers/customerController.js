@@ -15,10 +15,40 @@ exports.customerSignup = async (req, res) => {
             });
         }
 
-        // 2. Hash password
+        // 2. Check uniqueness for username, email, phone_number individually
+        const existingCheck = await pool.query(
+            `SELECT username, email, phone_number
+             FROM indian_big_bazaar_customer
+             WHERE username = $1 OR email = $2 OR phone_number = $3`,
+            [username, email, phone_number]
+        );
+
+        if (existingCheck.rows.length > 0) {
+            const conflicts = [];
+
+            for (const row of existingCheck.rows) {
+                if (row.username === username && !conflicts.includes("username")) {
+                    conflicts.push("username");
+                }
+                if (row.email === email && !conflicts.includes("email")) {
+                    conflicts.push("email");
+                }
+                if (row.phone_number === phone_number && !conflicts.includes("phone_number")) {
+                    conflicts.push("phone_number");
+                }
+            }
+
+            return res.status(409).json({
+                success: false,
+                message: `${conflicts.join(", ")} already in use`,
+                conflicts, // e.g. ["email"] or ["username", "phone_number"]
+            });
+        }
+
+        // 3. Hash password
         const password_hash = await bcrypt.hash(password, 10);
 
-        // 3. Insert into DB
+        // 4. Insert into DB
         const result = await pool.query(
             `INSERT INTO indian_big_bazaar_customer
                 (full_name, username, email, phone_number, password_hash)
@@ -33,7 +63,10 @@ exports.customerSignup = async (req, res) => {
             customer: result.rows[0],
         });
     } catch (error) {
-        // Unique constraint violation (username/email/phone already exists)
+        // Fallback safety net — handles a race condition where two signups
+        // for the same username/email/phone land at almost the same time,
+        // both pass the pre-check above, then the DB's UNIQUE constraint
+        // still catches the second one
         if (error.code === "23505") {
             return res.status(409).json({
                 success: false,
@@ -135,4 +168,12 @@ exports.customerLogin = async (req, res) => {
             message: "Internal server error",
         });
     }
+};
+
+
+exports.getMe = async (req, res) => {
+    return res.status(200).json({
+        success: true,
+        customer: req.customer,
+    });
 };
