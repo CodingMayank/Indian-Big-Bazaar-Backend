@@ -383,7 +383,7 @@ exports.getProductsByAdmin = async (req, res) => {
         // 3. Fetch products
         const result = await pool.query(
             `SELECT product_id, product_name, price_gbp, price_inr, stock_quantity,
-                    product_description, product_image, created_at, updated_at
+                    product_description, product_image,category, created_at, updated_at
              FROM indian_big_bazaar_admin_products
              WHERE admin_id = $1
              ORDER BY created_at DESC
