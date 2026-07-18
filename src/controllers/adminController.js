@@ -1,8 +1,20 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { pool } = require("../config/database.js"); // adjust path to your db config file
+const cloudinary = require("../config/cloudinary.js");
 
-
+const uploadToCloudinary = (buffer) => {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            { folder: "big_bazaar_products" },
+            (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+            }
+        );
+        stream.end(buffer);
+    });
+};
 // POST /admin/create
 exports.createAdmin = async (req, res) => {
   try {
@@ -141,4 +153,173 @@ exports.getMe = async (req, res) => {
     success: true,
     admin: req.admin,
   });
+};
+
+// POST /admin/product
+exports.createProduct = async (req, res) => {
+    try {
+        const { admin_id, product_name, price,category, stock_quantity, product_description } = req.body;
+
+        // 1. Basic validation
+        if (!admin_id || !product_name || !price || stock_quantity === undefined) {
+            return res.status(400).json({
+                success: false,
+                message: "admin_id, product_name, price and stock_quantity are required",
+            });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: "product_image is required",
+            });
+        }
+
+        const priceGBP = Number(price);
+        if (isNaN(priceGBP) || priceGBP <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "price must be a valid positive number",
+            });
+        }
+
+        // 2. Check admin exists and is active
+        const adminResult = await pool.query(
+            `SELECT admin_id, is_active FROM indian_big_bazaar_admin WHERE admin_id = $1`,
+            [admin_id]
+        );
+
+        if (adminResult.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Admin not found",
+            });
+        }
+
+        if (!adminResult.rows[0].is_active) {
+            return res.status(403).json({
+                success: false,
+                message: "Admin account is inactive",
+            });
+        }
+
+        // 3. Convert GBP -> INR
+        const conversionRate = Number(process.env.GBP_TO_INR_RATE) || 105.5;
+        const priceINR = Number((priceGBP * conversionRate).toFixed(2));
+
+        // 4. Upload image to Cloudinary
+        let uploadResult;
+        try {
+            uploadResult = await uploadToCloudinary(req.file.buffer);
+        } catch (uploadErr) {
+            console.error("Cloudinary upload error:", uploadErr);
+            return res.status(502).json({
+                success: false,
+                message: "Image upload failed",
+            });
+        }
+
+        // 5. Insert product
+        const result = await pool.query(
+            `INSERT INTO indian_big_bazaar_admin_products
+                (admin_id, product_name, price_gbp, price_inr, stock_quantity, product_description, product_image,category)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING product_id, product_name, price_gbp, price_inr, stock_quantity, product_description, product_image, created_at`,
+            [
+                admin_id,
+                product_name,
+                priceGBP,
+                priceINR,
+                stock_quantity,
+                product_description || null,
+                uploadResult.secure_url,
+                category
+            ]
+        );
+
+        return res.status(201).json({
+            success: true,
+            message: "Product created successfully",
+            product: result.rows[0],
+        });
+    } catch (error) {
+        console.error("Create product error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    }
+};
+
+// GET /admin/product/:admin_id
+exports.getProductsByAdmin = async (req, res) => {
+    try {
+        const { admin_id } = req.params;
+        const page = Number(req.query.page) || 1;
+        const limit = Number(req.query.limit) || 10;
+        const offset = (page - 1) * limit;
+
+        if (!admin_id) {
+            return res.status(400).json({
+                success: false,
+                message: "admin_id is required",
+            });
+        }
+
+        // 1. Check admin exists and is active
+        const adminResult = await pool.query(
+            `SELECT admin_id, is_active FROM indian_big_bazaar_admin WHERE admin_id = $1`,
+            [admin_id]
+        );
+
+        if (adminResult.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Admin not found",
+            });
+        }
+
+        if (!adminResult.rows[0].is_active) {
+            return res.status(403).json({
+                success: false,
+                message: "Admin account is inactive",
+            });
+        }
+
+        // 2. Get total count (for pagination info)
+        const countResult = await pool.query(
+            `SELECT COUNT(*) FROM indian_big_bazaar_admin_products WHERE admin_id = $1`,
+            [admin_id]
+        );
+        const totalProducts = Number(countResult.rows[0].count);
+
+        // 3. Fetch products
+        const result = await pool.query(
+            `SELECT product_id, product_name, price_gbp, price_inr, stock_quantity,
+                    product_description, product_image, created_at, updated_at
+             FROM indian_big_bazaar_admin_products
+             WHERE admin_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [admin_id, limit, offset]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Products fetched successfully",
+            pagination: {
+                total: totalProducts,
+                page,
+                limit,
+                totalPages: Math.ceil(totalProducts / limit),
+            },
+            products: result.rows,
+        });
+    } catch (error) {
+        console.error("Get products error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    }
 };
