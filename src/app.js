@@ -7,7 +7,8 @@ const hpp = require("hpp");
 const morgan = require("morgan");
 
 const rateLimiter = require("./middlewares/rateLimiter.js");
-// const routes = require("./routes");
+const Customerroutes = require("./routes/customerRoute.js");
+const Adminroutes = require("./routes/adminRoute.js");
 const notFoundMiddleware = require("./middlewares/notfound.js");
 const errorMiddleware = require("./middlewares/error.js");
 
@@ -60,7 +61,8 @@ app.get("/health", (req, res) => {
     });
 });
 
-// app.use("/api/v1", routes);
+app.use("/api/v1/customer", Customerroutes);
+app.use("/api/v1/admin", Adminroutes);
 
 app.use(notFoundMiddleware);
 app.use(errorMiddleware);
