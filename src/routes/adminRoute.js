@@ -10,7 +10,7 @@ router.post("/createAdmin",AdminController.createAdmin);
 
 router.post("/login",AdminController.adminLogin);
 
-router.post("/createproduct", upload.single("product_image"), AdminController.createProduct);
+router.post("/createproduct", upload.single("product_image"), AdminController.createOrUpdateProduct);
 
 router.get("/getproduct/:admin_id", AdminController.getProductsByAdmin);
 

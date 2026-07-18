@@ -2,19 +2,8 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { pool } = require("../config/database.js"); // adjust path to your db config file
 const cloudinary = require("../config/cloudinary.js");
+const uploadToCloudinary = require("../utils/uploadfile.js");
 
-const uploadToCloudinary = (buffer) => {
-    return new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-            { folder: "big_bazaar_products" },
-            (error, result) => {
-                if (error) return reject(error);
-                resolve(result);
-            }
-        );
-        stream.end(buffer);
-    });
-};
 // POST /admin/create
 exports.createAdmin = async (req, res) => {
   try {
@@ -156,30 +145,23 @@ exports.getMe = async (req, res) => {
 };
 
 // POST /admin/product
-exports.createProduct = async (req, res) => {
+exports.createOrUpdateProduct = async (req, res) => {
     try {
-        const { admin_id, product_name, price,category, stock_quantity, product_description } = req.body;
+        const {
+            product_id, // if present -> update, else -> create
+            admin_id,
+            product_name,
+            price,
+            category,
+            stock_quantity,
+            product_description,
+        } = req.body;
 
-        // 1. Basic validation
-        if (!admin_id || !product_name || !price || stock_quantity === undefined) {
+        // 1. admin_id always required
+        if (!admin_id) {
             return res.status(400).json({
                 success: false,
-                message: "admin_id, product_name, price and stock_quantity are required",
-            });
-        }
-
-        if (!req.file) {
-            return res.status(400).json({
-                success: false,
-                message: "product_image is required",
-            });
-        }
-
-        const priceGBP = Number(price);
-        if (isNaN(priceGBP) || priceGBP <= 0) {
-            return res.status(400).json({
-                success: false,
-                message: "price must be a valid positive number",
+                message: "admin_id is required",
             });
         }
 
@@ -203,28 +185,133 @@ exports.createProduct = async (req, res) => {
             });
         }
 
-        // 3. Convert GBP -> INR
-        const conversionRate = Number(process.env.GBP_TO_INR_RATE) || 105.5;
-        const priceINR = Number((priceGBP * conversionRate).toFixed(2));
+        // 3. Validate price if provided (needed for both create, and update-if-sent)
+        let priceGBP, priceINR;
+        if (price !== undefined) {
+            priceGBP = Number(price);
+            if (isNaN(priceGBP) || priceGBP <= 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "price must be a valid positive number",
+                });
+            }
+            const conversionRate = Number(process.env.GBP_TO_INR_RATE) || 105.5;
+            priceINR = Number((priceGBP * conversionRate).toFixed(2));
+        }
 
-        // 4. Upload image to Cloudinary
-        let uploadResult;
-        try {
-            uploadResult = await uploadToCloudinary(req.file.buffer);
-        } catch (uploadErr) {
-            console.error("Cloudinary upload error:", uploadErr);
-            return res.status(502).json({
-                success: false,
-                message: "Image upload failed",
+        // 4. Upload image only if a new file was sent
+        let imageUrl;
+        if (req.file) {
+            try {
+                const uploadResult = await uploadToCloudinary(req.file.buffer);
+                imageUrl = uploadResult.secure_url;
+            } catch (uploadErr) {
+                console.error("Cloudinary upload error:", uploadErr);
+                return res.status(502).json({
+                    success: false,
+                    message: "Image upload failed",
+                });
+            }
+        }
+
+        // ============ EDIT MODE ============
+        if (product_id) {
+            // Check product exists and belongs to this admin
+            const existing = await pool.query(
+                `SELECT product_id FROM indian_big_bazaar_admin_products
+                 WHERE product_id = $1 AND admin_id = $2`,
+                [product_id, admin_id]
+            );
+
+            if (existing.rows.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Product not found for this admin",
+                });
+            }
+
+            // Build dynamic SET clause — only update fields that were actually sent
+            const fields = [];
+            const values = [];
+            let idx = 1;
+
+            if (product_name !== undefined) {
+                fields.push(`product_name = $${idx++}`);
+                values.push(product_name);
+            }
+            if (price !== undefined) {
+                fields.push(`price_gbp = $${idx++}`);
+                values.push(priceGBP);
+                fields.push(`price_inr = $${idx++}`);
+                values.push(priceINR);
+            }
+            if (category !== undefined) {
+                fields.push(`category = $${idx++}`);
+                values.push(category);
+            }
+            if (stock_quantity !== undefined) {
+                fields.push(`stock_quantity = $${idx++}`);
+                values.push(stock_quantity);
+            }
+            if (product_description !== undefined) {
+                fields.push(`product_description = $${idx++}`);
+                values.push(product_description);
+            }
+            if (imageUrl !== undefined) {
+                fields.push(`product_image = $${idx++}`);
+                values.push(imageUrl);
+            }
+
+            if (fields.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "No fields provided to update",
+                });
+            }
+
+            fields.push(`updated_at = CURRENT_TIMESTAMP`);
+
+            values.push(product_id, admin_id);
+
+            const updateQuery = `
+                UPDATE indian_big_bazaar_admin_products
+                SET ${fields.join(", ")}
+                WHERE product_id = $${idx++} AND admin_id = $${idx++}
+                RETURNING product_id, product_name, price_gbp, price_inr, stock_quantity,
+                          product_description, product_image, category, updated_at
+            `;
+
+            const updateResult = await pool.query(updateQuery, values);
+
+            return res.status(200).json({
+                success: true,
+                message: "Product updated successfully",
+                product: updateResult.rows[0],
             });
         }
 
-        // 5. Insert product
-        const result = await pool.query(
+        // ============ CREATE MODE ============
+
+        // For create, these fields are mandatory
+        if (!product_name || price === undefined || stock_quantity === undefined) {
+            return res.status(400).json({
+                success: false,
+                message: "product_name, price and stock_quantity are required to create a product",
+            });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: "product_image is required to create a product",
+            });
+        }
+
+        const insertResult = await pool.query(
             `INSERT INTO indian_big_bazaar_admin_products
-                (admin_id, product_name, price_gbp, price_inr, stock_quantity, product_description, product_image,category)
+                (admin_id, product_name, price_gbp, price_inr, stock_quantity, product_description, product_image, category)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING product_id, product_name, price_gbp, price_inr, stock_quantity, product_description, product_image, created_at`,
+             RETURNING product_id, product_name, price_gbp, price_inr, stock_quantity, product_description, product_image, category, created_at`,
             [
                 admin_id,
                 product_name,
@@ -232,18 +319,18 @@ exports.createProduct = async (req, res) => {
                 priceINR,
                 stock_quantity,
                 product_description || null,
-                uploadResult.secure_url,
-                category
+                imageUrl,
+                category || null,
             ]
         );
 
         return res.status(201).json({
             success: true,
             message: "Product created successfully",
-            product: result.rows[0],
+            product: insertResult.rows[0],
         });
     } catch (error) {
-        console.error("Create product error:", error);
+        console.error("Create/Update product error:", error);
         return res.status(500).json({
             success: false,
             message: "Internal server error",
